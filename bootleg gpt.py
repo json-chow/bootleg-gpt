@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.nn import functional as F
 from dataclasses import dataclass
 from tokenizer import BPETokenizer
 
@@ -22,6 +23,8 @@ class BootlegGPTConfig():
             self.n_inner = 4 * self.n_embd
         if self.device == None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if self.n_embd % self.n_head != 0:
+            raise ValueError("n_embd is not a multiple of n_head")
 
 
 class LayerNorm(nn.Module):
@@ -42,15 +45,50 @@ class LayerNorm(nn.Module):
 
 class ScaledDotProductAttention(nn.Module):
 
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
+        # Query, key, value transforms
+        self.query = nn.Linear(config.n_embd, config.n_embd // config.n_head, bias=config.bias)
+        self.key = nn.Linear(config.n_embd, config.n_embd // config.n_head, bias=config.bias)
+        self.value = nn.Linear(config.n_embd, config.n_embd // config.n_head, bias=config.bias)
+
+        self.bitmask = torch.tril(torch.ones(self.config.n_ctx, self.config.n_ctx, device=self.config.device))
+
+        # Attention dropout
+        self.dropout = nn.Dropout(config.drop)
+
+    def forward(self, x):
+        q = self.query(x)
+        k = self.key(x)
+        # Attention score -- Dot product of query with all keys and divide by sqrt(d_k)
+        alpha = q @ k.transpose(1, 2) * k.shape[-1]**-0.5  # (b, t, c_head) @ (b, c_head, t) --> (b, t, t)
+        # Attention masking
+        alpha = alpha.masked_fill(self.bitmask == 0, float("-inf"))
+        alpha = F.softmax(alpha, dim=-1)
+        # Randomly dropout from the softmax
+        alpha = self.dropout(alpha)
+        v = self.value(x)
+        h = alpha @ v  # (b, t, t) @ (b, t, c) --> (b, t, c)
+        return h
 
 
 class MultiHeadAttention(nn.Module):
     '''Concatenation of parallel scaled dot product attention layers'''
 
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
+        self.heads = nn.ModuleList([ScaledDotProductAttention(config) for _ in range(config.n_head)])
+        self.linear = nn.Linear(config.n_embd, config.n_embd)
+        # Residual dropout
+        self.dropout = nn.Dropout(config.drop)
+
+    def forward(self, x):
+        # Concatenate in the channel dimension (final c = n_embd)
+        out = torch.cat([head(x) for head in self.heads], dim=2)
+        out = self.linear(out)
+        return self.dropout(out)
 
 
 class FeedForward(nn.Module):
@@ -76,9 +114,15 @@ class Block(nn.Module):
         super().__init__()
         # Uses pre-normalization
         self.ln_1 = LayerNorm(config)
-        self.attn = 0
+        self.attn = MultiHeadAttention(config)
         self.ln_2 = LayerNorm(config)
-        self.ffw = 0
+        self.ffw = FeedForward(config)
+
+    def forward(self, x):
+        x = self.ln_1(x)
+        x = self.attn(x)
+        x = self.ln_2(x)
+        return self.ffw(x)
 
 
 # Based on the nanogpt implementation of gpt2
@@ -93,9 +137,16 @@ class BootlegGPT(nn.Module):
         self.wpe = nn.Embedding(config.n_ctx, config.n_embd)
 
         # Dropout layer
-        self.drop = nn.Dropout(c.drop)
+        self.drop = nn.Dropout(config.drop)
+
+        # Stack of decoder blocks
+        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+
+        # Final layer norm + linear layer
+        self.layernorm = LayerNorm(config)
+        self.linear = nn.Linear(config.n_embd, config.vocab_size)
     
-    def forward(self, idx, target=None):
+    def forward(self, idx, targets=None):
         # idxs come in with a batch and time dimension: b, t
         b, t = idx.size()
 
@@ -106,14 +157,29 @@ class BootlegGPT(nn.Module):
 
         # Embedding dropout
         x = self.drop(tok_emb + pos_emb)
-        y = x.mean(2, keepdim=True)
-        
-        return x
+
+        for block in self.blocks:
+            x = block(x)
+        x = self.layernorm(x)
+
+        # LM head
+        logits = self.linear(x)  # (b, t, n_embd) --> (b, t, vocab_size)
+
+        if targets is not None:
+            # Training
+            logits = logits.view(-1, self.config.vocab_size)
+            targets = targets.view(-1)
+            loss = F.cross_entropy(logits, targets)
+        else:
+            # Inference
+            loss = None
+
+        return logits, loss
 
 
 if __name__ == "__main__":
     # Tests
-    c = BootlegGPTConfig(vocab_size=500, n_ctx=4, n_embd=8)
+    c = BootlegGPTConfig(vocab_size=500, n_ctx=4, n_embd=8, n_head=1)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Load data
@@ -131,8 +197,16 @@ if __name__ == "__main__":
         x = torch.stack([train_data[idx:idx+c.n_ctx] for idx in idxs]).to(device)
         y = torch.stack([train_data[idx+1:idx+c.n_ctx+1] for idx in idxs]).to(device)
         return x, y
-    test_x, test_y = get_batch()
-    print(test_x)
+    # b x t x c -- 6 x 4 x 8
     model = BootlegGPT(c).to(device)
-    print(model(test_x))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    loss = 0
+    for i in range(1000):
+        if i % 100 == 0:
+            print(f"Step {i}: Loss={loss}")
+        xb, yb = get_batch()
 
+        logits, loss = model(xb, yb)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
