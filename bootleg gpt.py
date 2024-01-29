@@ -112,7 +112,7 @@ class Block(nn.Module):
     
     def __init__(self, config):
         super().__init__()
-        # Uses pre-normalization
+        # Uses pre-normalization: norm and add
         self.ln_1 = LayerNorm(config)
         self.attn = MultiHeadAttention(config)
         self.ln_2 = LayerNorm(config)
@@ -120,9 +120,10 @@ class Block(nn.Module):
 
     def forward(self, x):
         x = self.ln_1(x)
-        x = self.attn(x)
+        x = x + self.attn(x)
         x = self.ln_2(x)
-        return self.ffw(x)
+        out = x + self.ffw(x)
+        return out
 
 
 # Based on the nanogpt implementation of gpt2
