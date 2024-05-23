@@ -159,6 +159,7 @@ class BootlegGPT(nn.Module):
         # Embedding dropout
         x = self.drop(tok_emb + pos_emb)
 
+        # Pass through the decoder blocks
         for block in self.blocks:
             x = block(x)
         x = self.layernorm(x)
@@ -185,7 +186,7 @@ if __name__ == "__main__":
 
     # Load data
     batch_sz = 6
-    with open("wikitext-103-raw/wiki.valid.raw", encoding="utf-8") as f:
+    with open("data/wikitext-103-raw/valid.raw", encoding="utf-8") as f:
         data = f.read()
     tokenizer = BPETokenizer("vocab.json", "merges.txt")
     data = tokenizer(data)

@@ -2,8 +2,10 @@ import torch
 import torch.nn as nn
 import regex as re
 import json
+from tqdm import tqdm
+from functools import lru_cache
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 
 
 # Byte Level BytePairEncoding -- based on gpt-2 implementation
@@ -52,26 +54,21 @@ class BPETokenizer(nn.Module):
                                  \s+  # 1+ whitespace characters
                                  """, re.X)
 
-    def forward(self, text):
+    def forward(self, text, return_tensors=True, n_jobs=1):
         if isinstance(text, list):
             # Batch encode
-            tokens = self.encode_batch(text)
-            # Flatten list
-            tokens = [token for row in tokens for token in row]
+            tokens = self.encode_batch(text, n_jobs)
         else:
             # Encode string
-            tokens = self.encode(text)
-        return torch.tensor(tokens)
+            tokens = torch.tensor(self.encode(text))
+        return tokens
 
+    @lru_cache(maxsize=16384)
     def bpe(self, token):
         '''
         Applies merge rules on token
         '''
-        # Memoization
-        if token in self.cache:
-            return self.cache[token]
-
-        chars = [i for i in token]
+        chars = [char for char in token]
         # For each merge rule, attempt to merge any adjacent pairs of characters
         for pair in self.bpe_ranks.keys():
             i = 0
@@ -80,7 +77,6 @@ class BPETokenizer(nn.Module):
                     chars = chars[:i] + ["".join(pair)] + chars[i+2:]
                 else:
                     i += 1
-        self.cache[token] = chars
         return chars
 
     def encode(self, text: list[str]) -> list[int]:
@@ -88,20 +84,19 @@ class BPETokenizer(nn.Module):
         Encodes a string into BPE tokens
         '''
         bpe_tokens = []
-
         # Splits text using the regex pattern to be fed into the BPE algorithm
-        for token in re.findall(self.pat, text):
+        for token in tqdm(re.finditer(self.pat, text), desc="Tokenizing text"):
             # Transform token into its bytes representation, map the bytes to its unicode repr
-            token = "".join(self.byte_encoder[b] for b in token.encode("utf-8"))
+            token = "".join(self.byte_encoder[b] for b in token[0].encode("utf-8"))
             # Perform bpe merges on the token, then map results to their BPE indices according to the encoder
             bpe_tokens.extend(self.encoder[bpe_token] for bpe_token in self.bpe(token))
         return bpe_tokens
 
-    def encode_batch(self, batch: list[list[str]], num_threads=4):
+    def encode_batch(self, batch: list[list[str]], n_jobs: int = 1) -> list[list[int]]:
         '''
-        Encodes a list of strings into a list of BPE tokens
+        Encodes lists of strings into corresponding lists of BPE tokens
         '''
-        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        with ProcessPoolExecutor(max_workers=n_jobs) as executor:
             result = executor.map(self.encode, batch)
         return list(result)
 
@@ -128,35 +123,37 @@ class BPETokenizer(nn.Module):
         merges = []
 
         # Build the vocab until the desired vocab size is met
-        while len(vocab) < vocab_size:
-            pair_freq = Counter()
-            # Find the most common pair
-            for split_word in split_words:
-                pair_freq.update(zip(split_word[:-1], split_word[1:]))
-            most_common_pair = pair_freq.most_common(1)[0][0]
-            
-            # Update vocab and merges list
-            new_token = most_common_pair[0] + most_common_pair[1]
-            vocab.add(new_token)
-            merges.append(most_common_pair)
+        with tqdm(total=vocab_size, initial=len(vocab), desc="Building vocabulary") as pbar:
+            while len(vocab) < vocab_size:
+                pair_freq = Counter()
+                # Find the most common pair
+                for split_word in split_words:
+                    pair_freq.update(zip(split_word[:-1], split_word[1:]))
+                most_common_pair = pair_freq.most_common(1)[0][0]
+                
+                # Update vocab and merges list
+                new_token = most_common_pair[0] + most_common_pair[1]
+                vocab.add(new_token)
+                merges.append(most_common_pair)
 
-            # Perform the merge on the data
-            new_split_words = []
-            for split_word in split_words:
-                i = 0
-                new_word = []
-                # For each bigram in the word, attempt a merge
-                while i < len(split_word) - 1:
-                    if (split_word[i], split_word[i+1]) == most_common_pair:
-                        new_word.append(new_token)
-                        i += 2
-                    else:
+                # Perform the merge on the data
+                new_split_words = []
+                for split_word in split_words:
+                    i = 0
+                    new_word = []
+                    # For each bigram in the word, attempt a merge
+                    while i < len(split_word) - 1:
+                        if (split_word[i], split_word[i+1]) == most_common_pair:
+                            new_word.append(new_token)
+                            i += 2
+                        else:
+                            new_word.append(split_word[i])
+                            i += 1
+                    if i == len(split_word) - 1:
                         new_word.append(split_word[i])
-                        i += 1
-                if i == len(split_word) - 1:
-                    new_word.append(split_word[i])
-                new_split_words.append(new_word)
-            split_words = new_split_words
+                    new_split_words.append(new_word)
+                split_words = new_split_words
+                pbar.update(1)
 
         vocab = sorted(list(vocab))
         # Write to file
@@ -173,15 +170,15 @@ class BPETokenizer(nn.Module):
 if __name__ == "__main__":
     '''Tests'''
     # Load data
-    with open("wikitext-103-raw/wiki.valid.raw", encoding="utf-8") as f:
+    with open("data/wikitext-103-raw/valid.raw", encoding="utf-8") as f:
         data = f.read()
     # BPETokenizer.train_tokenizer(data, 500, vocab_outfile="vocab.json", merges_outfile="merges.txt")
     tokenizer = BPETokenizer("vocab.json", "merges.txt")
-    # e = tokenizer(data)
-    e = tokenizer(
-        [
-            "hello how are ya'll doing",
-            "hey, i'm doing quite fine today!"
-        ]
-    )
-    print(e)
+    e = tokenizer(data)
+    # e = tokenizer(
+    #     [
+    #         "hello how are ya'll doing",
+    #         "hey, i'm doing quite fine today!"
+    #     ]
+    # )
+    # print(e)
