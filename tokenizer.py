@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import regex as re
 import json
+import mmap
 from tqdm import tqdm
 from functools import lru_cache
 from collections import Counter
@@ -46,7 +47,7 @@ class BPETokenizer(nn.Module):
         self.cache = {}
 
         # Pretokenization splitting regex pattern
-        self.pat = re.compile(r"""
+        self.pat = re.compile(rb"""
                                  's|'t|'re|'ve|'m|'ll|'d|  # Common contractions
                                  \ ?\p{L}+|\ ?\p{N}+|  # Optional space followed by 1+ unicode letter or number
                                  \ ?[^\s\p{L}\p{N}]+|  # Optional space followed by 1+ non-whitespace/letter/number
@@ -60,7 +61,8 @@ class BPETokenizer(nn.Module):
             tokens = self.encode_batch(text, n_jobs)
         else:
             # Encode string
-            tokens = torch.tensor(self.encode(text))
+            tokens = self.encode(text)
+            tokens = torch.tensor(tokens) if return_tensors else tokens
         return tokens
 
     @lru_cache(maxsize=16384)
@@ -79,20 +81,24 @@ class BPETokenizer(nn.Module):
                     i += 1
         return chars
 
-    def encode(self, text: list[str]) -> list[int]:
+    def encode(self, text: str|bytes|mmap.mmap) -> list[int]:
         '''
         Encodes a string into BPE tokens
         '''
         bpe_tokens = []
+        # Convert string to bytestring
+        if (type(text) == str):
+            text = text.encode("utf-8")
+
         # Splits text using the regex pattern to be fed into the BPE algorithm
         for token in tqdm(re.finditer(self.pat, text), desc="Tokenizing text"):
             # Transform token into its bytes representation, map the bytes to its unicode repr
-            token = "".join(self.byte_encoder[b] for b in token[0].encode("utf-8"))
+            token = "".join(self.byte_encoder[b] for b in token[0])
             # Perform bpe merges on the token, then map results to their BPE indices according to the encoder
             bpe_tokens.extend(self.encoder[bpe_token] for bpe_token in self.bpe(token))
         return bpe_tokens
 
-    def encode_batch(self, batch: list[list[str]], n_jobs: int = 1) -> list[list[int]]:
+    def encode_batch(self, batch: list[str], n_jobs: int = 1) -> list[list[int]]:
         '''
         Encodes lists of strings into corresponding lists of BPE tokens
         '''
@@ -170,15 +176,18 @@ class BPETokenizer(nn.Module):
 if __name__ == "__main__":
     '''Tests'''
     # Load data
-    with open("data/wikitext-103-raw/valid.raw", encoding="utf-8") as f:
-        data = f.read()
-    # BPETokenizer.train_tokenizer(data, 500, vocab_outfile="vocab.json", merges_outfile="merges.txt")
     tokenizer = BPETokenizer("vocab.json", "merges.txt")
-    e = tokenizer(data)
+    with open("data/wikitext-103-raw/valid.raw", encoding="utf-8") as f:
+        # data = f.read()
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        e = tokenizer(mm)
+        mm.close()
+    # BPETokenizer.train_tokenizer(data, 500, vocab_outfile="vocab.json", merges_outfile="merges.txt")
+    # e = tokenizer(data)
     # e = tokenizer(
     #     [
     #         "hello how are ya'll doing",
     #         "hey, i'm doing quite fine today!"
     #     ]
     # )
-    # print(e)
+    print(e)
