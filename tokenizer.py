@@ -9,18 +9,25 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 
 
-# Byte Level BytePairEncoding -- based on gpt-2 implementation
+# Byte Level BytePairEncoding
 def bytes_to_unicode() -> dict[int, str]:
     '''
     Returns a mapping from bytes to unicode character
     '''
     # Characters that when printed, aren't meaningful -- to be shifted to a more meaningful repr
-    to_shift = set(range(0, 33)) | set(range(127, 161)) | {168}
+    to_shift = set(range(0, 33)) | set(range(127, 161)) | {173}
 
     # Keys of the dictionary -- each byte
     byte = range(0, 256)
     # Values of the dictionary -- each unicode char
-    chars = [chr(i + 256) if i in to_shift else chr(i) for i in range(0, 256)]
+    chars = []
+    n = 0
+    for i in byte:
+        if i in to_shift:
+            chars.append(chr(256 + n))
+            n += 1
+        else:
+            chars.append(chr(i))
     return dict(zip(byte, chars))
 
 class BPETokenizer(nn.Module):
@@ -35,18 +42,18 @@ class BPETokenizer(nn.Module):
         # Store merges as a list of tuples, remove last blank line
         merges = [tuple(merge_str.split()) for merge_str in merges.split("\n")[:-1]]
 
-        # Token to BPE index mappings
+        # Token to/from BPE index mappings
         self.encoder = vocab
         self.decoder = {v: k for k, v in self.encoder.items()}
 
-        # Byte to unicode character mappings
+        # Byte to/from unicode character mappings
         self.byte_encoder = bytes_to_unicode()
         self.byte_decoder = {v: k for k, v in self.byte_encoder.items()}
 
         self.bpe_ranks = dict(zip(merges, range(len(merges))))
         self.cache = {}
 
-        # Pretokenization splitting regex pattern
+        # GPT-2 pre-tokenization splitting regex pattern
         self.pat = re.compile(rb"""
                                  's|'t|'re|'ve|'m|'ll|'d|  # Common contractions
                                  \ ?\p{L}+|\ ?\p{N}+|  # Optional space followed by 1+ unicode letter or number
@@ -57,10 +64,8 @@ class BPETokenizer(nn.Module):
 
     def forward(self, text, return_tensors=True, n_jobs=1):
         if isinstance(text, list):
-            # Batch encode
             tokens = self.encode_batch(text, n_jobs)
         else:
-            # Encode string
             tokens = self.encode(text)
             tokens = torch.tensor(tokens) if return_tensors else tokens
         return tokens
@@ -109,9 +114,33 @@ class BPETokenizer(nn.Module):
     def decode(self, tokens) -> str:
         if isinstance(tokens, torch.Tensor):
             tokens = tokens.tolist()
+        if isinstance(tokens, int):  # single token passed in
+            tokens = [tokens]
         text = "".join([self.decoder[token] for token in tokens])
         text = bytearray([self.byte_decoder[c] for c in text]).decode("utf-8", errors="replace")
         return text
+    
+    @property
+    def vocab_len(self) -> int:
+        return len(self.encoder)
+    
+    @staticmethod
+    def merge(split_word, merge_rule):
+        '''Apply merge rules on a split word'''
+        i = 0
+        new_token = merge_rule[0] + merge_rule[1]
+        new_word = []
+        # For each bigram in the word, attempt a merge
+        while i < len(split_word) - 1:
+            if (split_word[i], split_word[i+1]) == merge_rule:
+                new_word.append(new_token)
+                i += 2
+            else:
+                new_word.append(split_word[i])
+                i += 1
+        if i == len(split_word) - 1:
+            new_word.append(split_word[i])
+        return new_word
     
     @staticmethod
     def train_tokenizer(data, vocab_size, vocab_outfile=None, merges_outfile=None):
@@ -120,9 +149,9 @@ class BPETokenizer(nn.Module):
 
         # Pretokenize the data
         byte_encoder = bytes_to_unicode()
-        pat_str = r"'s|'t|'re|'ve|'m|'ll|'d| ?[\p{L}]+| ?[\p{N}]+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
+        pat_str = re.compile(rb"'s|'t|'re|'ve|'m|'ll|'d| ?[\p{L}]+| ?[\p{N}]+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+")
         split_words = [
-            [byte_encoder[b] for b in token.encode("utf-8")] for token in re.findall(pat_str, data)
+            [byte_encoder[b] for b in token[0]] for token in re.finditer(pat_str, data)
         ]
         # Add base vocabulary to the vocab
         vocab = set(byte_encoder.values())
@@ -136,7 +165,7 @@ class BPETokenizer(nn.Module):
                 for split_word in split_words:
                     pair_freq.update(zip(split_word[:-1], split_word[1:]))
                 most_common_pair = pair_freq.most_common(1)[0][0]
-                
+
                 # Update vocab and merges list
                 new_token = most_common_pair[0] + most_common_pair[1]
                 vocab.add(new_token)
@@ -144,7 +173,8 @@ class BPETokenizer(nn.Module):
 
                 # Perform the merge on the data
                 new_split_words = []
-                for split_word in split_words:
+                while len(split_words) > 0:
+                    split_word = split_words.pop()
                     i = 0
                     new_word = []
                     # For each bigram in the word, attempt a merge
@@ -171,23 +201,3 @@ class BPETokenizer(nn.Module):
             with open(vocab_outfile, "w", encoding="utf-8") as f:
                 json.dump({v: i for i, v in enumerate(vocab)}, f, ensure_ascii=False)
         return vocab, merges
-
-
-if __name__ == "__main__":
-    '''Tests'''
-    # Load data
-    tokenizer = BPETokenizer("vocab.json", "merges.txt")
-    with open("data/wikitext-103-raw/valid.raw", encoding="utf-8") as f:
-        # data = f.read()
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        e = tokenizer(mm)
-        mm.close()
-    # BPETokenizer.train_tokenizer(data, 500, vocab_outfile="vocab.json", merges_outfile="merges.txt")
-    # e = tokenizer(data)
-    # e = tokenizer(
-    #     [
-    #         "hello how are ya'll doing",
-    #         "hey, i'm doing quite fine today!"
-    #     ]
-    # )
-    print(e)

@@ -34,13 +34,16 @@ class LayerNorm(nn.Module):
         super().__init__()
         self.eps = config.layer_norm_eps
         self.gamma = torch.ones(config.n_embd, device=config.device)
-        self.beta = torch.zeros(config.n_embd, device=config.device)
+        self.beta = torch.zeros(config.n_embd, device=config.device) if config.bias else None
 
     def forward(self, x):
         mean = x.mean(2, keepdim=True)
         std = x.var(2, keepdim=True)
         x = (x - mean) / torch.sqrt(std + self.eps)
-        return x * self.gamma + self.beta
+        if self.beta != None:
+            return x * self.gamma + self.beta
+        else:
+            return x * self.gamma
 
 
 class ScaledDotProductAttention(nn.Module):
@@ -59,12 +62,13 @@ class ScaledDotProductAttention(nn.Module):
         self.dropout = nn.Dropout(config.drop)
 
     def forward(self, x):
+        T = x.shape[1]  # Extract sequence length
         q = self.query(x)
         k = self.key(x)
-        # Attention score -- Dot product of query with all keys and divide by sqrt(d_k)
+        # Attention score -- Dot product of query with all keys and divide by sqrt of key dim
         alpha = q @ k.transpose(1, 2) * k.shape[-1]**-0.5  # (b, t, c_head) @ (b, c_head, t) --> (b, t, t)
         # Attention masking
-        alpha = alpha.masked_fill(self.bitmask == 0, float("-inf"))
+        alpha = alpha.masked_fill(self.bitmask[:T, :T] == 0, float("-inf"))
         alpha = F.softmax(alpha, dim=-1)
         # Randomly dropout from the softmax
         alpha = self.dropout(alpha)
@@ -80,7 +84,7 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.config = config
         self.heads = nn.ModuleList([ScaledDotProductAttention(config) for _ in range(config.n_head)])
-        self.linear = nn.Linear(config.n_embd, config.n_embd)
+        self.linear = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         # Residual dropout
         self.dropout = nn.Dropout(config.drop)
 
@@ -96,14 +100,14 @@ class FeedForward(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.lin1 = nn.Linear(config.n_embd, config.n_inner)
-        self.relu = nn.ReLU()
-        self.lin2 = nn.Linear(config.n_inner, config.n_embd)
+        self.lin1 = nn.Linear(config.n_embd, config.n_inner, bias=config.bias)
+        self.gelu = nn.GELU()
+        self.lin2 = nn.Linear(config.n_inner, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.drop)
 
     def forward(self, x):
         x = self.lin1(x)
-        x = self.relu(x)
+        x = self.gelu(x)
         x = self.lin2(x)
         return self.dropout(x)
 
@@ -143,7 +147,7 @@ class BootlegGPT(nn.Module):
         # Stack of decoder blocks
         self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
 
-        # Final layer norm + linear layer
+        # Final layer norm + LM head
         self.layernorm = LayerNorm(config)
         self.linear = nn.Linear(config.n_embd, config.vocab_size)
     
@@ -169,46 +173,11 @@ class BootlegGPT(nn.Module):
 
         if targets is not None:
             # Training
-            logits = logits.view(-1, self.config.vocab_size)
-            targets = targets.view(-1)
+            logits = logits.view(-1, self.config.vocab_size)  # (b * t, vocab_size)
+            targets = targets.view(-1)  # (b * t)
             loss = F.cross_entropy(logits, targets)
         else:
             # Inference
             loss = None
 
         return logits, loss
-
-
-if __name__ == "__main__":
-    # Tests
-    c = BootlegGPTConfig(vocab_size=500, n_ctx=4, n_embd=8, n_head=1)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Load data
-    batch_sz = 6
-    with open("data/wikitext-103-raw/valid.raw", encoding="utf-8") as f:
-        data = f.read()
-    tokenizer = BPETokenizer("vocab.json", "merges.txt")
-    data = tokenizer(data)
-    split = int(0.9*len(data))
-    train_data = data[:split]
-    val_data = data[split:]
-    def get_batch():
-        # Sample random indices
-        idxs = torch.randint(len(train_data) - c.n_ctx, (batch_sz,))
-        x = torch.stack([train_data[idx:idx+c.n_ctx] for idx in idxs]).to(device)
-        y = torch.stack([train_data[idx+1:idx+c.n_ctx+1] for idx in idxs]).to(device)
-        return x, y
-    # b x t x c -- 6 x 4 x 8
-    model = BootlegGPT(c).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    loss = 0
-    for i in range(1000):
-        if i % 100 == 0:
-            print(f"Step {i}: Loss={loss}")
-        xb, yb = get_batch()
-
-        logits, loss = model(xb, yb)
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
