@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from dataclasses import dataclass
-from tokenizer import BPETokenizer
 
 
 @dataclass
@@ -13,15 +12,15 @@ class BootlegGPTConfig():
     n_layer: int = 12  # Number of transformer blocks
     n_head: int = 12  # Number of attention heads
     n_inner: int = None  # Dimensionality of feedforward layers, default is 4 * n_embd
-    drop: int = 0.1  # Dropout probability
-    layer_norm_eps: int = 1e-5  # Epsilon for layer norm layers
+    drop: float = 0.1  # Dropout probability
+    layer_norm_eps: float = 1e-5  # Epsilon for layer norm layers
     bias: bool = True  # Include bias in linear layers
     device: str = None  # Which device to run on
 
     def __post_init__(self):
-        if self.n_inner == None:
+        if self.n_inner is None:
             self.n_inner = 4 * self.n_embd
-        if self.device == None:
+        if self.device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.n_embd % self.n_head != 0:
             raise ValueError("n_embd is not a multiple of n_head")
@@ -40,7 +39,7 @@ class LayerNorm(nn.Module):
         mean = x.mean(2, keepdim=True)
         std = x.var(2, keepdim=True)
         x = (x - mean) / torch.sqrt(std + self.eps)
-        if self.beta != None:
+        if self.beta is not None:
             return x * self.gamma + self.beta
         else:
             return x * self.gamma
@@ -96,7 +95,7 @@ class MultiHeadAttention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    '''Two linear transformations with a ReLU activation in between'''
+    '''Two linear transformations with a GELU activation in between'''
 
     def __init__(self, config):
         super().__init__()
@@ -111,9 +110,10 @@ class FeedForward(nn.Module):
         x = self.lin2(x)
         return self.dropout(x)
 
+
 class Block(nn.Module):
     '''Single transformer block'''
-    
+
     def __init__(self, config):
         super().__init__()
         # Uses pre-normalization: norm and add
@@ -150,7 +150,7 @@ class BootlegGPT(nn.Module):
         # Final layer norm + LM head
         self.layernorm = LayerNorm(config)
         self.linear = nn.Linear(config.n_embd, config.vocab_size)
-    
+
     def forward(self, idx, targets=None):
         # idxs come in with a batch and time dimension: b, t
         b, t = idx.size()

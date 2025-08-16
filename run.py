@@ -50,7 +50,7 @@ with torch.no_grad():
             # out_token = tokenizer.decode(torch.argmax(model(tokens)[0][:, -1, :]).unsqueeze(0))
             # sampling distribution
             model_output = model(tokens)[0]
-            out_token = torch.nn.functional.softmax(model_output[:,-1,:])  # final token in time 
+            out_token = torch.nn.functional.softmax(model_output[:, -1, :])  # final token in time
             out_token = tokenizer.decode(torch.multinomial(out_token, 1).item())
             curr_contents += out_token
             f.write(out_token)

@@ -22,9 +22,10 @@ if os.path.exists(out_loc):
     iter_num = ckpt["iter_num"]
 
 xs = [i for i in range(0, iter_num+1, iter_num//len(train_losses))][1:]
-plt.plot(xs, [i.item() if type(i) == torch.Tensor else i for i in train_losses], label="Train Loss")
-plt.plot(xs, [i.item() if type(i) == torch.Tensor else i for i in val_losses], label="Val Loss")
+plt.plot(xs, [i.item() if isinstance(i, torch.Tensor) else i for i in train_losses], label="Train Loss")
+plt.plot(xs, [i.item() if isinstance(i, torch.Tensor) else i for i in val_losses], label="Val Loss")
 plt.legend()
 plt.xlabel("Iterations")
 plt.ylabel("Loss")
+plt.title("Loss Curve")
 plt.show()

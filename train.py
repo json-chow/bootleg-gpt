@@ -42,6 +42,8 @@ for file in os.listdir(data_loc):
 # Load data
 train_data = np.load(os.path.join(data_loc, "train.bin"), mmap_mode="r")
 val_data = np.load(os.path.join(data_loc, "val.bin"), mmap_mode="r")
+
+
 def get_batch(split):
     if split == "train":
         data = train_data
@@ -55,6 +57,7 @@ def get_batch(split):
     # Get the next words for each instance of x
     y = torch.stack([torch.from_numpy(data[idx+1:idx+context_length+1]) for idx in idxs]).to(device)
     return x, y
+
 
 # Check if model already exists in path, if so then load it
 out_dir = tr_conf["out_dir"]
@@ -94,12 +97,13 @@ else:
     val_losses = []
 summary(model, input_data=get_batch("train"), device=device)
 
+
 @torch.no_grad()
 def estimate_loss():
     out = {}
     model.eval()
     eval_iters = int(tr_conf["eval_iters"])
-    with tqdm(total=eval_iters*2, desc=f"Estimating loss") as pbar:
+    with tqdm(total=eval_iters*2, desc="Estimating loss") as pbar:
         for split in ["train", "val"]:
             avg_loss = 0
             for _ in range(eval_iters):
@@ -111,10 +115,11 @@ def estimate_loss():
     model.train()
     return out
 
+
 # Training loop
 max_iters = int(tr_conf["max_iters"])
 with tqdm(total=max_iters, initial=iter_num, desc="Training model") as pbar:
-    while iter_num <= max_iters :
+    while iter_num <= max_iters:
         xb, yb = get_batch("train")
         logits, loss = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
